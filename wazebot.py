@@ -588,47 +588,80 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
         return
 
-    # 5) If all else fails, try additional methods for place URLs
-    logger.info("URL parameter parsing also failed, trying place URL methods...")
-    coords = try_get_coordinates_from_place_url(expanded_url, headers)
-    if coords:
-        lat, lon = coords
-        logger.info(f"Parsed coordinates from place URL: lat={lat}, lon={lon}")
-        waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
-        await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
-        return
-
-    # 6) Try alternative coordinate resolution methods using the place ID
-    place_id = extract_place_id(expanded_url)
-    if place_id:
-        logger.info(f"Trying alternative coordinate resolution with place ID: {place_id}")
-        coords = try_alternative_coordinate_resolution(place_id, headers)
+    # 5) Check if we're hitting consent pages - if so, skip HTTP methods and go to browser
+    consent_detected = "consent.google.com" in resp.url or "consent.google.com" in expanded_url
+    
+    if consent_detected:
+        logger.info("Consent pages detected - skipping HTTP methods, going directly to headless browser...")
+        
+        # Try geocoding fallback first (fast and often works)
+        logger.info("Trying geocoding fallback...")
+        coords = try_geocoding_fallback(expanded_url)
         if coords:
             lat, lon = coords
-            logger.info(f"Parsed coordinates via alternative resolution: lat={lat}, lon={lon}")
+            logger.info(f"Parsed coordinates from geocoding fallback: lat={lat}, lon={lon}")
+            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
+            await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
+            return
+        
+        # If geocoding fails, go directly to headless browser
+        logger.info("Geocoding failed, trying headless browser...")
+        coords = await try_headless_browser_resolution(expanded_url)
+        if coords:
+            lat, lon = coords
+            logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
+            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
+            await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
+            return
+    else:
+        # No consent detected - try a few quick HTTP methods before browser
+        logger.info("No consent detected, trying quick HTTP methods...")
+        
+        # Try just one quick alternative URL
+        place_id = extract_place_id(expanded_url)
+        if place_id:
+            hex_parts = place_id.replace("1s", "").split(":")
+            if len(hex_parts) == 2:
+                try:
+                    hex1, hex2 = hex_parts
+                    simple_url = f"https://www.google.com/maps?cid={hex2}"
+                    logger.info(f"Trying simple CID URL: {simple_url}")
+                    
+                    basic_headers = {"User-Agent": "Mozilla/5.0"}
+                    resp = requests.get(simple_url, headers=basic_headers, timeout=3, allow_redirects=False)
+                    
+                    if resp.status_code in [301, 302] and "Location" in resp.headers:
+                        redirect_url = resp.headers["Location"]
+                        if "consent.google.com" not in redirect_url:
+                            coords = extract_coordinates_from_google_url(redirect_url)
+                            if coords:
+                                lat, lon = coords
+                                logger.info(f"Parsed coordinates from quick redirect: lat={lat}, lon={lon}")
+                                waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
+                                await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
+                                return
+                except Exception as e:
+                    logger.info(f"Quick method failed: {e}")
+
+        # Try geocoding fallback
+        logger.info("Quick methods failed, trying geocoding fallback...")
+        coords = try_geocoding_fallback(expanded_url)
+        if coords:
+            lat, lon = coords
+            logger.info(f"Parsed coordinates from geocoding fallback: lat={lat}, lon={lon}")
             waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
             await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
             return
 
-    # 7) Try headless browser resolution
-    logger.info("Place URL methods also failed, trying headless browser resolution...")
-    coords = await try_headless_browser_resolution(expanded_url)
-    if coords:
-        lat, lon = coords
-        logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
-        waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
-        await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
-        return
-
-    # 8) Try geocoding fallback
-    logger.info("Geocoding fallback...")
-    coords = try_geocoding_fallback(expanded_url)
-    if coords:
-        lat, lon = coords
-        logger.info(f"Parsed coordinates from geocoding fallback: lat={lat}, lon={lon}")
-        waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
-        await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
-        return
+        # Finally try headless browser
+        logger.info("All quick methods failed, trying headless browser...")
+        coords = await try_headless_browser_resolution(expanded_url)
+        if coords:
+            lat, lon = coords
+            logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
+            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
+            await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
+            return
 
     logger.info("❌ Failed to parse coordinates from expanded URL using all methods.")
     await update.message.reply_text(
