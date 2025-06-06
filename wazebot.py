@@ -469,6 +469,7 @@ def try_geocoding_fallback(url: str) -> tuple[float, float] | None:
     """
     try:
         import urllib.parse
+        import re
         
         # Extract business name and address from the URL path
         if '/place/' in url:
@@ -477,24 +478,55 @@ def try_geocoding_fallback(url: str) -> tuple[float, float] | None:
             place_name = urllib.parse.unquote_plus(place_part.replace('+', ' '))
             logger.info(f"Extracted place name: {place_name}")
             
-            # Try multiple search strategies with different levels of detail
-            search_queries = [
-                place_name,  # Full name
-                # Extract just the address parts
-                "R. da Pimenta 35, 1990-254 Lisboa, Portugal",
-                "Parque das Nações, Lisboa, Portugal", 
-                "Zona Ribeirinha Norte, Lisboa, Portugal",
-                # Just the restaurant name and city
-                "Senhor Peixe restaurante Lisboa Portugal",
-                # Just the street address
-                "Rua da Pimenta 35 Lisboa",
-            ]
+            # Try to extract different components from the place name
+            search_queries = [place_name]  # Always start with full name
+            
+            # Try to extract address components dynamically
+            if ',' in place_name:
+                parts = [part.strip() for part in place_name.split(',')]
+                
+                # Look for postal codes (format: NNNN-NNN)
+                postal_code_pattern = r'\b\d{4}-\d{3}\b'
+                
+                # Try to find city/location names and postal codes
+                for i, part in enumerate(parts):
+                    # If this part contains a postal code, create address queries
+                    if re.search(postal_code_pattern, part):
+                        # This part likely contains city and postal code
+                        if i > 0:
+                            # Include the street part + city part
+                            street_and_city = ', '.join(parts[i-1:i+1])
+                            search_queries.append(f"{street_and_city}, Portugal")
+                        
+                        # Just the city part
+                        search_queries.append(f"{part}, Portugal")
+                
+                # Try different combinations of parts
+                if len(parts) >= 2:
+                    # Last two parts (often street + city)
+                    search_queries.append(f"{parts[-2]}, {parts[-1]}, Portugal")
+                    
+                    # Just the last part (often the city)
+                    search_queries.append(f"{parts[-1]}, Portugal")
+                
+                # Try each part individually with Portugal
+                for part in parts[1:]:  # Skip first part (business name)
+                    if len(part.strip()) > 3:  # Only meaningful parts
+                        search_queries.append(f"{part.strip()}, Portugal")
+            
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_queries = []
+            for query in search_queries:
+                if query not in seen:
+                    seen.add(query)
+                    unique_queries.append(query)
             
             headers = {
                 "User-Agent": "TelegramBot/1.0 (contact@example.com)"  # Nominatim requires a user agent
             }
             
-            for query in search_queries:
+            for query in unique_queries:
                 try:
                     nominatim_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(query)}&format=json&limit=3"
                     
@@ -594,22 +626,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if consent_detected:
         logger.info("Consent pages detected - skipping HTTP methods, going directly to headless browser...")
         
-        # Try geocoding fallback first (fast and often works)
-        logger.info("Trying geocoding fallback...")
-        coords = try_geocoding_fallback(expanded_url)
-        if coords:
-            lat, lon = coords
-            logger.info(f"Parsed coordinates from geocoding fallback: lat={lat}, lon={lon}")
-            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
-            await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
-            return
-        
-        # If geocoding fails, go directly to headless browser
-        logger.info("Geocoding failed, trying headless browser...")
+        # Try headless browser first (most accurate)
+        logger.info("Trying headless browser...")
         coords = await try_headless_browser_resolution(expanded_url)
         if coords:
             lat, lon = coords
             logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
+            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
+            await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
+            return
+        
+        # If headless browser fails, try geocoding fallback as last resort
+        logger.info("Headless browser failed, trying geocoding fallback as last resort...")
+        coords = try_geocoding_fallback(expanded_url)
+        if coords:
+            lat, lon = coords
+            logger.info(f"Parsed coordinates from geocoding fallback: lat={lat}, lon={lon}")
             waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
             await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
             return
@@ -643,22 +675,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 except Exception as e:
                     logger.info(f"Quick method failed: {e}")
 
-        # Try geocoding fallback
-        logger.info("Quick methods failed, trying geocoding fallback...")
-        coords = try_geocoding_fallback(expanded_url)
-        if coords:
-            lat, lon = coords
-            logger.info(f"Parsed coordinates from geocoding fallback: lat={lat}, lon={lon}")
-            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
-            await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
-            return
-
-        # Finally try headless browser
-        logger.info("All quick methods failed, trying headless browser...")
+        # Try headless browser (most accurate)
+        logger.info("Quick methods failed, trying headless browser...")
         coords = await try_headless_browser_resolution(expanded_url)
         if coords:
             lat, lon = coords
             logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
+            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
+            await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
+            return
+
+        # Finally try geocoding fallback as last resort
+        logger.info("Headless browser failed, trying geocoding fallback as last resort...")
+        coords = try_geocoding_fallback(expanded_url)
+        if coords:
+            lat, lon = coords
+            logger.info(f"Parsed coordinates from geocoding fallback: lat={lat}, lon={lon}")
             waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
             await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
             return
