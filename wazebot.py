@@ -316,6 +316,84 @@ def try_alternative_coordinate_resolution(place_id: str, headers: dict) -> tuple
     return None
 
 
+def try_direct_place_id_resolution(place_id: str) -> tuple[float, float] | None:
+    """
+    Try to resolve coordinates directly from a place ID by making targeted requests.
+    Place IDs like 1s0xd1ecca7e6530079:0x7eb7624ea64a4a4a contain hex coordinates.
+    """
+    try:
+        logger.info(f"Trying direct place ID resolution for: {place_id}")
+        
+        # Extract hex parts
+        hex_parts = place_id.replace("1s", "").split(":")
+        if len(hex_parts) != 2:
+            return None
+            
+        hex1, hex2 = hex_parts
+        logger.info(f"Extracted hex parts: {hex1}, {hex2}")
+        
+        # Try several direct approaches
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        
+        # Method 1: Try direct CID redirect (most reliable)
+        try:
+            cid_url = f"https://www.google.com/maps?cid={hex2}"
+            logger.info(f"Trying CID redirect: {cid_url}")
+            
+            resp = requests.get(cid_url, headers=headers, timeout=5, allow_redirects=False)
+            if resp.status_code in [301, 302] and "Location" in resp.headers:
+                redirect_url = resp.headers["Location"]
+                logger.info(f"CID redirect location: {redirect_url}")
+                
+                if "consent.google.com" not in redirect_url:
+                    coords = extract_coordinates_from_google_url(redirect_url)
+                    if coords:
+                        logger.info(f"Success with CID redirect: {coords}")
+                        return coords
+        except Exception as e:
+            logger.info(f"CID redirect failed: {e}")
+        
+        # Method 2: Try alternative domain approaches
+        alternative_domains = ["maps.google.co.uk", "maps.google.de", "maps.google.ca"]
+        for domain in alternative_domains:
+            try:
+                alt_url = f"https://{domain}/maps?cid={hex2}"
+                logger.info(f"Trying alternative domain: {alt_url}")
+                
+                resp = requests.get(alt_url, headers=headers, timeout=3, allow_redirects=False)
+                if resp.status_code in [301, 302] and "Location" in resp.headers:
+                    redirect_url = resp.headers["Location"]
+                    if "consent.google.com" not in redirect_url:
+                        coords = extract_coordinates_from_google_url(redirect_url)
+                        if coords:
+                            logger.info(f"Success with alternative domain {domain}: {coords}")
+                            return coords
+            except Exception as e:
+                logger.info(f"Alternative domain {domain} failed: {e}")
+                continue
+        
+        # Method 3: Try search approach
+        try:
+            search_url = f"https://www.google.com/search?q=site:maps.google.com+{hex2}"
+            logger.info(f"Trying search approach: {search_url}")
+            
+            resp = requests.get(search_url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                coords = extract_coordinates_from_google_url(resp.text)
+                if coords:
+                    logger.info(f"Success with search approach: {coords}")
+                    return coords
+        except Exception as e:
+            logger.info(f"Search approach failed: {e}")
+            
+    except Exception as e:
+        logger.error(f"Direct place ID resolution failed: {e}")
+    
+    return None
+
+
 async def try_headless_browser_resolution(url: str) -> tuple[float, float] | None:
     """
     Use a headless browser to load the Google Maps URL and extract coordinates
@@ -330,120 +408,127 @@ async def try_headless_browser_resolution(url: str) -> tuple[float, float] | Non
         
         # Set a maximum timeout for the entire operation
         async def browser_operation():
-            async with async_playwright() as p:
-                # Use chromium browser with shorter timeouts
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        '--no-sandbox',
-                        '--disable-dev-shm-usage',
-                        '--disable-web-security',
-                        '--disable-features=VizDisplayCompositor'
-                    ]
-                )
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                )
-                page = await context.new_page()
-                
-                try:
-                    # Navigate to the URL with shorter timeout
-                    logger.info(f"Loading URL in headless browser: {url}")
-                    await page.goto(url, wait_until="domcontentloaded", timeout=10000)  # 10 second timeout
-                    
-                    # Wait briefly for initial content
-                    await page.wait_for_timeout(1000)
-                    
-                    # Try to click any consent buttons if they exist
-                    try:
-                        # Quick consent button check with shorter timeouts
-                        consent_selectors = [
-                            'button:has-text("Aceitar tudo")',  # Portuguese
-                            'button:has-text("Accept all")',
-                            'button[data-value="accept"]',
-                            'button:has-text("Accept")',
-                            'button:has-text("Aceitar")',
+            browser = None
+            try:
+                async with async_playwright() as p:
+                    # Use chromium browser with shorter timeouts
+                    logger.info("Launching browser...")
+                    browser = await p.chromium.launch(
+                        headless=True,
+                        args=[
+                            '--no-sandbox',
+                            '--disable-dev-shm-usage',
+                            '--disable-web-security',
+                            '--disable-features=VizDisplayCompositor',
+                            '--disable-extensions',
+                            '--disable-plugins',
+                            '--disable-images',  # Faster loading
+                            '--disable-javascript',  # Try without JS first
                         ]
-                        
-                        for selector in consent_selectors[:3]:  # Only try first 3 to save time
-                            try:
-                                if await page.locator(selector).count() > 0:
-                                    logger.info(f"Found and clicking consent button: {selector}")
-                                    await page.locator(selector).first.click(timeout=2000)
-                                    await page.wait_for_timeout(1000)  # Shorter wait
-                                    break
-                            except Exception as e:
-                                logger.info(f"Failed to click selector {selector}: {e}")
-                                continue
-                                
-                    except Exception as e:
-                        logger.info(f"Consent handling failed: {e}")
+                    )
                     
-                    # Wait for maps to load but not too long
-                    await page.wait_for_timeout(2000)
+                    logger.info("Creating browser context...")
+                    context = await browser.new_context(
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        viewport={'width': 1280, 'height': 720}
+                    )
+                    page = await context.new_page()
                     
-                    # Get the final URL after all redirects and JavaScript execution
-                    final_url = page.url
-                    logger.info(f"Final URL after browser loading: {final_url}")
-                    
-                    # Try to extract coordinates from the final URL
-                    coords = extract_coordinates_from_google_url(final_url)
-                    if coords:
-                        return coords
-                    
-                    # If URL doesn't have coordinates, try to find them in the page content
                     try:
-                        page_content = await page.content()
-                        coords = extract_coordinates_from_google_url(page_content)
+                        # Navigate to the URL with shorter timeout
+                        logger.info(f"Loading URL in headless browser: {url}")
+                        await page.goto(url, wait_until="domcontentloaded", timeout=8000)  # 8 second timeout
+                        logger.info("Page loaded successfully")
+                        
+                        # Wait briefly for initial content
+                        await page.wait_for_timeout(500)
+                        
+                        # Get the final URL immediately
+                        final_url = page.url
+                        logger.info(f"Final URL after initial load: {final_url}")
+                        
+                        # Try to extract coordinates from the final URL first
+                        coords = extract_coordinates_from_google_url(final_url)
                         if coords:
+                            logger.info(f"Found coordinates in final URL: {coords}")
                             return coords
-                    except Exception as e:
-                        logger.info(f"Failed to get page content: {e}")
-                    
-                    # Try to execute JavaScript to get coordinates
-                    try:
-                        # Try to get coordinates from Google Maps JavaScript objects
-                        coords_js = await page.evaluate(r"""
-                            () => {
-                                // Try various ways to get coordinates from the page
-                                if (window.google && window.google.maps) {
-                                    // Check if there's a map center
-                                    const mapElements = document.querySelectorAll('[data-lat]');
-                                    if (mapElements.length > 0) {
-                                        const lat = mapElements[0].getAttribute('data-lat');
-                                        const lng = mapElements[0].getAttribute('data-lng');
-                                        if (lat && lng) return [parseFloat(lat), parseFloat(lng)];
-                                    }
-                                }
-                                
-                                // Look for coordinates in the page text
-                                const text = document.body.innerText;
-                                const coordMatch = text.match(/(-?\d+\.\d+),\s*(-?\d+\.\d+)/);
-                                if (coordMatch) {
-                                    return [parseFloat(coordMatch[1]), parseFloat(coordMatch[2])];
-                                }
-                                
-                                return null;
-                            }
-                        """)
                         
-                        if coords_js and len(coords_js) == 2:
-                            return float(coords_js[0]), float(coords_js[1])
+                        # If no coordinates yet, try simple consent handling
+                        logger.info("No coordinates in URL, trying consent handling...")
+                        try:
+                            # Just try the most common consent buttons quickly
+                            consent_clicked = False
+                            simple_selectors = [
+                                'button:has-text("Accept all")',
+                                'button:has-text("Aceitar")',
+                                'button[data-value="accept"]'
+                            ]
                             
+                            for selector in simple_selectors:
+                                try:
+                                    if await page.locator(selector).count() > 0:
+                                        logger.info(f"Found consent button: {selector}")
+                                        await page.locator(selector).first.click(timeout=1000)
+                                        consent_clicked = True
+                                        break
+                                except Exception as e:
+                                    logger.info(f"Consent selector {selector} failed: {e}")
+                                    continue
+                            
+                            if consent_clicked:
+                                logger.info("Consent button clicked, waiting for redirect...")
+                                await page.wait_for_timeout(2000)  # Wait for redirect
+                                
+                                final_url = page.url
+                                logger.info(f"Final URL after consent: {final_url}")
+                                
+                                coords = extract_coordinates_from_google_url(final_url)
+                                if coords:
+                                    logger.info(f"Found coordinates after consent: {coords}")
+                                    return coords
+                            
+                        except Exception as e:
+                            logger.info(f"Consent handling failed: {e}")
+                        
+                        # If still no luck, try to get page content and search for coordinates
+                        logger.info("Trying to extract coordinates from page content...")
+                        try:
+                            page_content = await page.content()
+                            coords = extract_coordinates_from_google_url(page_content)
+                            if coords:
+                                logger.info(f"Found coordinates in page content: {coords}")
+                                return coords
+                        except Exception as e:
+                            logger.info(f"Failed to get page content: {e}")
+                        
+                        logger.info("No coordinates found in headless browser")
+                        return None
+                        
                     except Exception as e:
-                        logger.info(f"JavaScript execution failed: {e}")
-                    
-                finally:
-                    await browser.close()
-                    
+                        logger.error(f"Error during page operations: {e}")
+                        return None
+                    finally:
+                        if browser:
+                            await browser.close()
+                            logger.info("Browser closed")
+                            
+            except Exception as e:
+                logger.error(f"Error in browser operation: {e}")
+                if browser:
+                    try:
+                        await browser.close()
+                    except:
+                        pass
                 return None
         
-        # Run the browser operation with a total timeout of 30 seconds
+        # Run the browser operation with a total timeout of 20 seconds (reduced from 30)
         try:
-            coords = await asyncio.wait_for(browser_operation(), timeout=30.0)
+            logger.info("Starting browser operation with 20 second timeout...")
+            coords = await asyncio.wait_for(browser_operation(), timeout=20.0)
+            logger.info(f"Browser operation completed with result: {coords}")
             return coords
         except asyncio.TimeoutError:
-            logger.error("Headless browser operation timed out after 30 seconds")
+            logger.error("Headless browser operation timed out after 20 seconds")
             return None
                 
     except ImportError:
@@ -566,6 +651,37 @@ def try_geocoding_fallback(url: str) -> tuple[float, float] | None:
     return None
 
 
+def extract_place_name(url: str) -> str | None:
+    """
+    Extract place name from a Google Maps URL.
+    Returns the business/place name if found, None otherwise.
+    """
+    try:
+        import urllib.parse
+        
+        if '/place/' in url:
+            # Extract the place part from the URL
+            place_part = url.split('/place/')[1].split('/')[0]
+            # URL decode the place name
+            place_name = urllib.parse.unquote_plus(place_part.replace('+', ' '))
+            
+            # If there's a comma, take only the first part (usually the business name)
+            if ',' in place_name:
+                business_name = place_name.split(',')[0].strip()
+                # Only return if it's meaningful (not too short, not just numbers)
+                if len(business_name) > 2 and not business_name.replace(' ', '').isdigit():
+                    return business_name
+            else:
+                # No comma, return the whole name if meaningful
+                if len(place_name) > 2 and not place_name.replace(' ', '').isdigit():
+                    return place_name
+                    
+    except Exception as e:
+        logger.info(f"Failed to extract place name: {e}")
+    
+    return None
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text.strip()
     if "maps.app.goo.gl/" not in text:
@@ -596,13 +712,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("❗️ Couldn't expand that Google Maps link.")
         return
 
+    # Extract place name for more informative responses
+    place_name = extract_place_name(expanded_url)
+    place_text = f" for {place_name}" if place_name else ""
+
     # 3) Try to parse numeric coordinates directly
     coords = extract_coordinates_from_google_url(expanded_url)
     if coords:
         lat, lon = coords
         logger.info(f"Parsed coordinates directly: lat={lat}, lon={lon}")
         waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
-        await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
+        await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
         return
 
     # 4) Try to extract coordinates from URL parameters/fragments
@@ -612,7 +732,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lat, lon = coords
         logger.info(f"Parsed coordinates from URL parameters: lat={lat}, lon={lon}")
         waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
-        await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
+        await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
         return
 
     # 5) Check if we're hitting consent pages - if so, skip HTTP methods and go to browser
@@ -628,7 +748,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             lat, lon = coords
             logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
             waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
-            await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
+            await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
             return
     else:
         # No consent detected - try a few quick HTTP methods before browser
@@ -655,7 +775,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                 lat, lon = coords
                                 logger.info(f"Parsed coordinates from quick redirect: lat={lat}, lon={lon}")
                                 waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
-                                await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
+                                await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
                                 return
                 except Exception as e:
                     logger.info(f"Quick method failed: {e}")
@@ -667,7 +787,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             lat, lon = coords
             logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
             waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
-            await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
+            await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
             return
 
     logger.info("❌ Failed to parse coordinates from expanded URL using all methods.")
