@@ -17,6 +17,9 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     raise RuntimeError("Please set the TELEGRAM_TOKEN environment variable.")
 
+# Global variable to track browser health
+BROWSER_HEALTHY = True
+
 # ─── Regex patterns to find numeric coordinates in a Google Maps URL ───────────────
 # 1) /@<lat>,<lon>,<zoom>/
 # 2) ?api=1&query=<lat>,<lon>
@@ -394,11 +397,84 @@ def try_direct_place_id_resolution(place_id: str) -> tuple[float, float] | None:
     return None
 
 
-async def try_headless_browser_resolution(url: str) -> tuple[float, float] | None:
+async def check_browser_health() -> bool:
+    """
+    Check if the headless browser is working properly.
+    Returns True if browser works, False otherwise.
+    """
+    try:
+        from playwright.async_api import async_playwright
+        import asyncio
+        
+        logger.info("Testing headless browser health...")
+        
+        async def test_browser():
+            try:
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(
+                        headless=True,
+                        args=[
+                            '--no-sandbox',
+                            '--disable-dev-shm-usage',
+                            '--disable-web-security',
+                            '--disable-features=VizDisplayCompositor',
+                            '--disable-extensions',
+                            '--disable-plugins',
+                            '--disable-images',
+                            '--disable-javascript',
+                            '--disable-gpu',
+                            '--disable-software-rasterizer',
+                            '--disable-background-timer-throttling',
+                            '--disable-renderer-backgrounding',
+                            '--disable-backgrounding-occluded-windows',
+                            '--single-process',  # Help with server environments
+                        ]
+                    )
+                    
+                    context = await browser.new_context(
+                        user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+                        viewport={'width': 800, 'height': 600}
+                    )
+                    
+                    page = await context.new_page()
+                    
+                    # Test with a simple page
+                    await page.goto("https://www.google.com", timeout=5000)
+                    title = await page.title()
+                    
+                    await browser.close()
+                    
+                    return "Google" in title
+                    
+            except Exception as e:
+                logger.error(f"Browser test failed: {e}")
+                return False
+        
+        # Run with 10 second timeout
+        result = await asyncio.wait_for(test_browser(), timeout=10.0)
+        logger.info(f"Browser health check: {'PASSED' if result else 'FAILED'}")
+        return result
+        
+    except ImportError:
+        logger.info("Playwright not installed - browser health check skipped")
+        return False
+    except asyncio.TimeoutError:
+        logger.error("Browser health check timed out")
+        return False
+    except Exception as e:
+        logger.error(f"Browser health check error: {e}")
+        return False
+
+
+async def try_headless_browser_resolution(url: str, browser_healthy: bool = True) -> tuple[float, float] | None:
     """
     Use a headless browser to load the Google Maps URL and extract coordinates
     from the final rendered page. This requires playwright to be installed.
     """
+    if not browser_healthy:
+        logger.info("Skipping headless browser - health check failed")
+        return None
+        
     try:
         # Try to import playwright - it may not be installed
         from playwright.async_api import async_playwright
@@ -416,6 +492,7 @@ async def try_headless_browser_resolution(url: str) -> tuple[float, float] | Non
                         try:
                             logger.info(f"Trying browser with JavaScript {'enabled' if js_enabled else 'disabled'}...")
                             
+                            # Optimized browser args for server environments
                             browser_args = [
                                 '--no-sandbox',
                                 '--disable-dev-shm-usage',
@@ -424,16 +501,38 @@ async def try_headless_browser_resolution(url: str) -> tuple[float, float] | Non
                                 '--disable-extensions',
                                 '--disable-plugins',
                                 '--disable-images',  # Faster loading
+                                '--disable-gpu',
+                                '--disable-software-rasterizer',
+                                '--disable-background-timer-throttling',
+                                '--disable-renderer-backgrounding',
+                                '--disable-backgrounding-occluded-windows',
+                                '--disable-ipc-flooding-protection',
+                                '--single-process',  # Important for server environments
+                                '--no-zygote',  # Disable zygote process
+                                '--disable-sync',
+                                '--disable-default-apps',
+                                '--no-first-run',
+                                '--disable-crashpad',
                             ]
                             
                             if not js_enabled:
                                 browser_args.append('--disable-javascript')
                             
-                            browser = await p.chromium.launch(headless=True, args=browser_args)
+                            browser = await p.chromium.launch(
+                                headless=True, 
+                                args=browser_args,
+                                # Additional options for server environments
+                                handle_sigint=False,
+                                handle_sigterm=False,
+                                handle_sighup=False,
+                            )
                             
                             context = await browser.new_context(
-                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                                viewport={'width': 1280, 'height': 720}
+                                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                                viewport={'width': 800, 'height': 600},  # Smaller viewport
+                                # Disable some features for performance
+                                java_script_enabled=js_enabled,
+                                bypass_csp=True,
                             )
                             
                             page = await context.new_page()
@@ -441,11 +540,11 @@ async def try_headless_browser_resolution(url: str) -> tuple[float, float] | Non
                             try:
                                 # Navigate to the URL with shorter timeout
                                 logger.info(f"Loading URL: {url}")
-                                await page.goto(url, wait_until="domcontentloaded", timeout=6000)  # 6 second timeout
+                                await page.goto(url, wait_until="domcontentloaded", timeout=4000)  # Even shorter timeout
                                 logger.info("Page loaded successfully")
                                 
                                 # Wait briefly for initial content
-                                await page.wait_for_timeout(500)
+                                await page.wait_for_timeout(300)
                                 
                                 # Get the final URL immediately
                                 final_url = page.url
@@ -461,11 +560,10 @@ async def try_headless_browser_resolution(url: str) -> tuple[float, float] | Non
                                 if js_enabled:
                                     logger.info("Trying consent handling...")
                                     try:
-                                        # Simple consent button detection
+                                        # Simple consent button detection with very short timeouts
                                         consent_selectors = [
                                             'button:has-text("Accept all")',
                                             'button:has-text("Aceitar")',
-                                            'button[aria-label*="Accept"]'
                                         ]
                                         
                                         for selector in consent_selectors:
@@ -473,8 +571,8 @@ async def try_headless_browser_resolution(url: str) -> tuple[float, float] | Non
                                                 elements = await page.locator(selector).count()
                                                 if elements > 0:
                                                     logger.info(f"Clicking consent button: {selector}")
-                                                    await page.locator(selector).first.click(timeout=1000)
-                                                    await page.wait_for_timeout(1500)
+                                                    await page.locator(selector).first.click(timeout=500)
+                                                    await page.wait_for_timeout(800)
                                                     
                                                     final_url = page.url
                                                     logger.info(f"URL after consent: {final_url}")
@@ -490,15 +588,16 @@ async def try_headless_browser_resolution(url: str) -> tuple[float, float] | Non
                                     except Exception as e:
                                         logger.info(f"Consent handling error: {e}")
                                 
-                                # Try page content as last resort
-                                try:
-                                    page_content = await page.content()
-                                    coords = extract_coordinates_from_google_url(page_content)
-                                    if coords:
-                                        logger.info(f"Found coordinates in page content: {coords}")
-                                        return coords
-                                except Exception as e:
-                                    logger.info(f"Page content extraction failed: {e}")
+                                # Try page content as last resort (only if no JS, to avoid hanging)
+                                if not js_enabled:
+                                    try:
+                                        page_content = await page.content()
+                                        coords = extract_coordinates_from_google_url(page_content)
+                                        if coords:
+                                            logger.info(f"Found coordinates in page content: {coords}")
+                                            return coords
+                                    except Exception as e:
+                                        logger.info(f"Page content extraction failed: {e}")
                                 
                             except Exception as e:
                                 logger.info(f"Page operation failed (JS {'on' if js_enabled else 'off'}): {e}")
@@ -529,14 +628,14 @@ async def try_headless_browser_resolution(url: str) -> tuple[float, float] | Non
                         pass
                 return None
         
-        # Run the browser operation with a total timeout of 15 seconds (further reduced)
+        # Run the browser operation with a total timeout of 10 seconds (even shorter)
         try:
-            logger.info("Starting browser operation with 15 second timeout...")
-            coords = await asyncio.wait_for(browser_operation(), timeout=15.0)
+            logger.info("Starting browser operation with 10 second timeout...")
+            coords = await asyncio.wait_for(browser_operation(), timeout=10.0)
             logger.info(f"Browser operation completed: {coords}")
             return coords
         except asyncio.TimeoutError:
-            logger.error("Headless browser operation timed out after 15 seconds")
+            logger.error("Headless browser operation timed out after 10 seconds")
             return None
                 
     except ImportError:
@@ -760,7 +859,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         # Try headless browser (most accurate)
         logger.info("Trying headless browser...")
-        coords = await try_headless_browser_resolution(expanded_url)
+        coords = await try_headless_browser_resolution(expanded_url, BROWSER_HEALTHY)
         if coords:
             lat, lon = coords
             logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
@@ -809,7 +908,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         # Try headless browser (most accurate)
         logger.info("All quick methods failed, trying headless browser...")
-        coords = await try_headless_browser_resolution(expanded_url)
+        coords = await try_headless_browser_resolution(expanded_url, BROWSER_HEALTHY)
         if coords:
             lat, lon = coords
             logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
@@ -832,12 +931,31 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 def main() -> None:
+    global BROWSER_HEALTHY
+    
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    logger.info("Bot is starting (polling)...")
+    logger.info("Bot is starting...")
+    
+    # Check browser health on startup
+    import asyncio
+    try:
+        logger.info("Performing browser health check...")
+        BROWSER_HEALTHY = asyncio.run(check_browser_health())
+        if BROWSER_HEALTHY:
+            logger.info("✅ Browser is healthy - headless browser resolution enabled")
+        else:
+            logger.warning("⚠️ Browser health check failed - headless browser resolution disabled")
+            logger.info("To fix this on a server, try running: playwright install-deps chromium")
+    except Exception as e:
+        logger.error(f"Browser health check error: {e}")
+        BROWSER_HEALTHY = False
+        logger.warning("⚠️ Browser health check failed - headless browser resolution disabled")
+    
+    logger.info("Starting bot polling...")
     app.run_polling()
 
 
