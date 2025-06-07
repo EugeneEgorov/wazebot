@@ -418,7 +418,7 @@ async def try_headless_browser_resolution(url: str) -> tuple[float, float] | Non
                 # Try to execute JavaScript to get coordinates
                 try:
                     # Try to get coordinates from Google Maps JavaScript objects
-                    coords_js = await page.evaluate("""
+                    coords_js = await page.evaluate(r"""
                         () => {
                             // Try various ways to get coordinates from the page
                             if (window.google && window.google.maps) {
