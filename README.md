@@ -61,7 +61,7 @@ A Telegram bot that converts Google Maps share links to Waze navigation links, m
 
 **Input**: `https://maps.app.goo.gl/XodKRcb7kt53ne8d9`
 
-**Output**: `Here's your Waze link: https://ul.waze.com/ul?ll=38.7711111,-9.0925&navigate=yes`
+**Output**: `Here's your Waze link: https://ul.waze.com/ul?ll=38.7711111,-9.0925`
 
 ## 🔧 How It Works
 

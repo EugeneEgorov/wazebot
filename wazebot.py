@@ -606,7 +606,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if coords:
         lat, lon = coords
         logger.info(f"Parsed coordinates directly: lat={lat}, lon={lon}")
-        waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
+        waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
         await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
         return
 
@@ -616,7 +616,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if coords:
         lat, lon = coords
         logger.info(f"Parsed coordinates from URL parameters: lat={lat}, lon={lon}")
-        waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
+        waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
         await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
         return
 
@@ -632,7 +632,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if coords:
             lat, lon = coords
             logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
-            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
+            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
             await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
             return
     else:
@@ -659,7 +659,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                             if coords:
                                 lat, lon = coords
                                 logger.info(f"Parsed coordinates from quick redirect: lat={lat}, lon={lon}")
-                                waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
+                                waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
                                 await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
                                 return
                 except Exception as e:
@@ -671,7 +671,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if coords:
             lat, lon = coords
             logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
-            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
+            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
             await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
             return
 
