@@ -324,132 +324,127 @@ async def try_headless_browser_resolution(url: str) -> tuple[float, float] | Non
     try:
         # Try to import playwright - it may not be installed
         from playwright.async_api import async_playwright
+        import asyncio
         
         logger.info("Attempting headless browser resolution...")
         
-        async with async_playwright() as p:
-            # Use chromium browser
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-            page = await context.new_page()
-            
-            try:
-                # Navigate to the URL
-                logger.info(f"Loading URL in headless browser: {url}")
-                await page.goto(url, wait_until="networkidle", timeout=15000)
-                
-                # Wait for the page to load and handle any consent dialogs
-                await page.wait_for_timeout(2000)
-                
-                # Try to click any consent buttons if they exist
-                try:
-                    # Common consent button selectors - updated for Google's current consent pages
-                    consent_selectors = [
-                        # Google's current consent page selectors
-                        'button[data-value="accept"]',
-                        'button:has-text("Accept all")',
-                        'button:has-text("I agree")',
-                        'button:has-text("Accept")',
-                        'button:has-text("Aceitar tudo")',  # Portuguese
-                        'button:has-text("Aceitar")',       # Portuguese
-                        '[data-action="accept"]',
-                        '.VfPpkd-LgbsSe[data-value="accept"]',
-                        'button[aria-label*="Accept"]',
-                        'button[aria-label*="Aceitar"]',    # Portuguese
-                        # Try any button with "accept" or "agree" in various languages
-                        'button:has-text("Agree")',
-                        'button:has-text("Continue")',
-                        'button:has-text("Continuar")',     # Portuguese
-                        # Direct CSS selectors for Google consent buttons
-                        'button[jsname="V67aGc"]',  # Google's consent button
-                        'button[data-ved]',         # Google's buttons often have this
+        # Set a maximum timeout for the entire operation
+        async def browser_operation():
+            async with async_playwright() as p:
+                # Use chromium browser with shorter timeouts
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--no-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-web-security',
+                        '--disable-features=VizDisplayCompositor'
                     ]
+                )
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                page = await context.new_page()
+                
+                try:
+                    # Navigate to the URL with shorter timeout
+                    logger.info(f"Loading URL in headless browser: {url}")
+                    await page.goto(url, wait_until="domcontentloaded", timeout=10000)  # 10 second timeout
                     
-                    for selector in consent_selectors:
-                        try:
-                            if await page.locator(selector).count() > 0:
-                                logger.info(f"Found and clicking consent button: {selector}")
-                                await page.locator(selector).first.click()
-                                await page.wait_for_timeout(3000)  # Wait longer after clicking
-                                break
-                        except Exception as e:
-                            logger.info(f"Failed to click selector {selector}: {e}")
-                            continue
-                            
-                    # If we're still on consent page, try to find any clickable button
-                    if "consent.google.com" in page.url:
-                        logger.info("Still on consent page, trying generic button search...")
-                        buttons = await page.locator('button').all()
-                        for button in buttons[:5]:  # Try first 5 buttons
+                    # Wait briefly for initial content
+                    await page.wait_for_timeout(1000)
+                    
+                    # Try to click any consent buttons if they exist
+                    try:
+                        # Quick consent button check with shorter timeouts
+                        consent_selectors = [
+                            'button:has-text("Aceitar tudo")',  # Portuguese
+                            'button:has-text("Accept all")',
+                            'button[data-value="accept"]',
+                            'button:has-text("Accept")',
+                            'button:has-text("Aceitar")',
+                        ]
+                        
+                        for selector in consent_selectors[:3]:  # Only try first 3 to save time
                             try:
-                                text = await button.text_content()
-                                if text and any(word in text.lower() for word in ['accept', 'agree', 'continue', 'aceitar', 'continuar']):
-                                    logger.info(f"Trying to click button with text: {text}")
-                                    await button.click()
-                                    await page.wait_for_timeout(3000)
+                                if await page.locator(selector).count() > 0:
+                                    logger.info(f"Found and clicking consent button: {selector}")
+                                    await page.locator(selector).first.click(timeout=2000)
+                                    await page.wait_for_timeout(1000)  # Shorter wait
                                     break
                             except Exception as e:
-                                logger.info(f"Failed to click button: {e}")
+                                logger.info(f"Failed to click selector {selector}: {e}")
                                 continue
-                            
-                except Exception as e:
-                    logger.info(f"No consent buttons found or error clicking: {e}")
-                
-                # Wait for maps to load
-                await page.wait_for_timeout(3000)
-                
-                # Get the final URL after all redirects and JavaScript execution
-                final_url = page.url
-                logger.info(f"Final URL after browser loading: {final_url}")
-                
-                # Try to extract coordinates from the final URL
-                coords = extract_coordinates_from_google_url(final_url)
-                if coords:
-                    return coords
-                
-                # If URL doesn't have coordinates, try to find them in the page content
-                page_content = await page.content()
-                coords = extract_coordinates_from_google_url(page_content)
-                if coords:
-                    return coords
-                
-                # Try to execute JavaScript to get coordinates
-                try:
-                    # Try to get coordinates from Google Maps JavaScript objects
-                    coords_js = await page.evaluate(r"""
-                        () => {
-                            // Try various ways to get coordinates from the page
-                            if (window.google && window.google.maps) {
-                                // Check if there's a map center
-                                const mapElements = document.querySelectorAll('[data-lat]');
-                                if (mapElements.length > 0) {
-                                    const lat = mapElements[0].getAttribute('data-lat');
-                                    const lng = mapElements[0].getAttribute('data-lng');
-                                    if (lat && lng) return [parseFloat(lat), parseFloat(lng)];
-                                }
-                            }
-                            
-                            // Look for coordinates in the page text
-                            const text = document.body.innerText;
-                            const coordMatch = text.match(/(-?\d+\.\d+),\s*(-?\d+\.\d+)/);
-                            if (coordMatch) {
-                                return [parseFloat(coordMatch[1]), parseFloat(coordMatch[2])];
-                            }
-                            
-                            return null;
-                        }
-                    """)
+                                
+                    except Exception as e:
+                        logger.info(f"Consent handling failed: {e}")
                     
-                    if coords_js and len(coords_js) == 2:
-                        return float(coords_js[0]), float(coords_js[1])
+                    # Wait for maps to load but not too long
+                    await page.wait_for_timeout(2000)
+                    
+                    # Get the final URL after all redirects and JavaScript execution
+                    final_url = page.url
+                    logger.info(f"Final URL after browser loading: {final_url}")
+                    
+                    # Try to extract coordinates from the final URL
+                    coords = extract_coordinates_from_google_url(final_url)
+                    if coords:
+                        return coords
+                    
+                    # If URL doesn't have coordinates, try to find them in the page content
+                    try:
+                        page_content = await page.content()
+                        coords = extract_coordinates_from_google_url(page_content)
+                        if coords:
+                            return coords
+                    except Exception as e:
+                        logger.info(f"Failed to get page content: {e}")
+                    
+                    # Try to execute JavaScript to get coordinates
+                    try:
+                        # Try to get coordinates from Google Maps JavaScript objects
+                        coords_js = await page.evaluate(r"""
+                            () => {
+                                // Try various ways to get coordinates from the page
+                                if (window.google && window.google.maps) {
+                                    // Check if there's a map center
+                                    const mapElements = document.querySelectorAll('[data-lat]');
+                                    if (mapElements.length > 0) {
+                                        const lat = mapElements[0].getAttribute('data-lat');
+                                        const lng = mapElements[0].getAttribute('data-lng');
+                                        if (lat && lng) return [parseFloat(lat), parseFloat(lng)];
+                                    }
+                                }
+                                
+                                // Look for coordinates in the page text
+                                const text = document.body.innerText;
+                                const coordMatch = text.match(/(-?\d+\.\d+),\s*(-?\d+\.\d+)/);
+                                if (coordMatch) {
+                                    return [parseFloat(coordMatch[1]), parseFloat(coordMatch[2])];
+                                }
+                                
+                                return null;
+                            }
+                        """)
                         
-                except Exception as e:
-                    logger.info(f"JavaScript execution failed: {e}")
-                
-            finally:
-                await browser.close()
+                        if coords_js and len(coords_js) == 2:
+                            return float(coords_js[0]), float(coords_js[1])
+                            
+                    except Exception as e:
+                        logger.info(f"JavaScript execution failed: {e}")
+                    
+                finally:
+                    await browser.close()
+                    
+                return None
+        
+        # Run the browser operation with a total timeout of 30 seconds
+        try:
+            coords = await asyncio.wait_for(browser_operation(), timeout=30.0)
+            return coords
+        except asyncio.TimeoutError:
+            logger.error("Headless browser operation timed out after 30 seconds")
+            return None
                 
     except ImportError:
         logger.info("Playwright not installed. To use headless browser resolution, install with: pip install playwright")
