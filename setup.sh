@@ -33,9 +33,39 @@ pip install --upgrade pip
 echo "📚 Installing Python dependencies..."
 pip install -r requirements.txt
 
-# Install Playwright browsers (optional)
-echo "🌐 Installing Playwright browsers (optional)..."
-playwright install chromium || echo "⚠️ Playwright browser installation failed. The bot will work without headless browser support."
+# Install Playwright browsers and system dependencies
+echo "🌐 Installing Playwright browsers..."
+playwright install chromium || echo "⚠️ Playwright browser installation failed."
+
+echo "🔧 Installing system dependencies for headless browser..."
+# Try to install playwright system dependencies
+playwright install-deps || {
+    echo "⚠️ Automatic dependency installation failed. Trying manual installation..."
+    
+    # Check if we have sudo access
+    if command -v sudo &> /dev/null; then
+        echo "📦 Installing browser dependencies manually..."
+        sudo apt-get update
+        sudo apt-get install -y \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libatspi2.0-0 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxfixes3 \
+            libxrandr2 \
+            libgbm1 \
+            libasound2 \
+            libxss1 \
+            libgtk-3-0 \
+            libdrm2 \
+            libxkbcommon0 \
+            libgtk-4-1 || echo "⚠️ Some dependencies might not be available on this system."
+    else
+        echo "⚠️ No sudo access. Please run the following command manually:"
+        echo "    sudo apt-get install libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2"
+    fi
+}
 
 # Prompt for Telegram bot token
 echo ""
@@ -56,6 +86,9 @@ echo "✅ Setup complete!"
 echo ""
 echo "To start the bot, run:"
 echo "  ./run.sh"
+echo ""
+echo "To run in background:"
+echo "  nohup ./run.sh > bot.log 2>&1 &"
 echo ""
 echo "To test the setup:"
 echo "  source venv/bin/activate"

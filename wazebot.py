@@ -626,22 +626,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if consent_detected:
         logger.info("Consent pages detected - skipping HTTP methods, going directly to headless browser...")
         
-        # Try headless browser first (most accurate)
+        # Try headless browser (most accurate)
         logger.info("Trying headless browser...")
         coords = await try_headless_browser_resolution(expanded_url)
         if coords:
             lat, lon = coords
             logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
-            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
-            await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
-            return
-        
-        # If headless browser fails, try geocoding fallback as last resort
-        logger.info("Headless browser failed, trying geocoding fallback as last resort...")
-        coords = try_geocoding_fallback(expanded_url)
-        if coords:
-            lat, lon = coords
-            logger.info(f"Parsed coordinates from geocoding fallback: lat={lat}, lon={lon}")
             waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
             await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
             return
@@ -681,16 +671,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if coords:
             lat, lon = coords
             logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
-            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
-            await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
-            return
-
-        # Finally try geocoding fallback as last resort
-        logger.info("Headless browser failed, trying geocoding fallback as last resort...")
-        coords = try_geocoding_fallback(expanded_url)
-        if coords:
-            lat, lon = coords
-            logger.info(f"Parsed coordinates from geocoding fallback: lat={lat}, lon={lon}")
             waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}&navigate=yes"
             await update.message.reply_text(f"Here's your Waze link:\n{waze_link}")
             return
