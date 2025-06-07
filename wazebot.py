@@ -19,6 +19,7 @@ if not TELEGRAM_TOKEN:
 
 # Global variable to track browser health
 BROWSER_HEALTHY = True
+BROWSER_HEALTH_CHECKED = False
 
 # ─── Regex patterns to find numeric coordinates in a Google Maps URL ───────────────
 # 1) /@<lat>,<lon>,<zoom>/
@@ -471,7 +472,25 @@ async def try_headless_browser_resolution(url: str, browser_healthy: bool = True
     Use a headless browser to load the Google Maps URL and extract coordinates
     from the final rendered page. This requires playwright to be installed.
     """
-    if not browser_healthy:
+    global BROWSER_HEALTHY, BROWSER_HEALTH_CHECKED
+    
+    # Perform lazy health check on first use
+    if not BROWSER_HEALTH_CHECKED:
+        logger.info("Performing browser health check...")
+        BROWSER_HEALTH_CHECKED = True
+        try:
+            BROWSER_HEALTHY = await check_browser_health()
+            if BROWSER_HEALTHY:
+                logger.info("✅ Browser is healthy - headless browser resolution enabled")
+            else:
+                logger.warning("⚠️ Browser health check failed - headless browser resolution disabled")
+                logger.info("To fix this on a server, try running: playwright install-deps chromium")
+        except Exception as e:
+            logger.error(f"Browser health check error: {e}")
+            BROWSER_HEALTHY = False
+            logger.warning("⚠️ Browser health check failed - headless browser resolution disabled")
+    
+    if not BROWSER_HEALTHY:
         logger.info("Skipping headless browser - health check failed")
         return None
         
@@ -786,6 +805,81 @@ def extract_place_name(url: str) -> str | None:
     return None
 
 
+def try_lightweight_browser_resolution(url: str) -> tuple[float, float] | None:
+    """
+    Use requests-html (lighter than Playwright) to resolve URLs with JavaScript support.
+    Falls back gracefully if requests-html is not available.
+    """
+    try:
+        from requests_html import HTMLSession
+        
+        logger.info("Trying lightweight browser (requests-html)...")
+        
+        session = HTMLSession()
+        
+        # Set headers to mimic a real browser
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        
+        try:
+            # Get the page
+            logger.info(f"Loading URL with requests-html: {url}")
+            r = session.get(url, timeout=10)
+            
+            # Try to extract coordinates from the URL first
+            final_url = r.url
+            logger.info(f"Final URL: {final_url}")
+            
+            coords = extract_coordinates_from_google_url(final_url)
+            if coords:
+                logger.info(f"Found coordinates in final URL: {coords}")
+                return coords
+            
+            # If no coordinates in URL, try rendering JavaScript (if needed)
+            try:
+                logger.info("Rendering JavaScript...")
+                r.html.render(timeout=8, wait=2, sleep=1)
+                
+                # Check URL again after rendering
+                final_url = r.url
+                logger.info(f"URL after JS rendering: {final_url}")
+                
+                coords = extract_coordinates_from_google_url(final_url)
+                if coords:
+                    logger.info(f"Found coordinates after JS rendering: {coords}")
+                    return coords
+                
+                # Try extracting from page content
+                coords = extract_coordinates_from_google_url(r.html.raw_html.decode())
+                if coords:
+                    logger.info(f"Found coordinates in page content: {coords}")
+                    return coords
+                    
+            except Exception as e:
+                logger.info(f"JavaScript rendering failed: {e}")
+                # Try without JS rendering
+                coords = extract_coordinates_from_google_url(r.html.raw_html.decode())
+                if coords:
+                    logger.info(f"Found coordinates in static content: {coords}")
+                    return coords
+            
+        except Exception as e:
+            logger.error(f"Lightweight browser request failed: {e}")
+            
+        finally:
+            session.close()
+            
+    except ImportError:
+        logger.info("requests-html not available. Install with: pip install requests-html")
+        return None
+    except Exception as e:
+        logger.error(f"Lightweight browser resolution failed: {e}")
+        return None
+    
+    return None
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text.strip()
     if "maps.app.goo.gl/" not in text:
@@ -843,7 +937,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     consent_detected = "consent.google.com" in resp.url or "consent.google.com" in expanded_url
     
     if consent_detected:
-        logger.info("Consent pages detected - skipping HTTP methods, going directly to headless browser...")
+        logger.info("Consent pages detected - skipping HTTP methods, going directly to lightweight browser...")
         
         # Try direct place ID resolution first (faster than browser)
         place_id = extract_place_id(expanded_url)
@@ -857,12 +951,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
                 return
         
-        # Try headless browser (most accurate)
-        logger.info("Trying headless browser...")
-        coords = await try_headless_browser_resolution(expanded_url, BROWSER_HEALTHY)
+        # Try lightweight browser (most accurate)
+        logger.info("Trying lightweight browser...")
+        coords = try_lightweight_browser_resolution(expanded_url)
         if coords:
             lat, lon = coords
-            logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
+            logger.info(f"Parsed coordinates from lightweight browser: lat={lat}, lon={lon}")
             waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
             await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
             return
@@ -906,12 +1000,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
                 return
 
-        # Try headless browser (most accurate)
-        logger.info("All quick methods failed, trying headless browser...")
-        coords = await try_headless_browser_resolution(expanded_url, BROWSER_HEALTHY)
+        # Try lightweight browser (most accurate)
+        logger.info("All quick methods failed, trying lightweight browser...")
+        coords = try_lightweight_browser_resolution(expanded_url)
         if coords:
             lat, lon = coords
-            logger.info(f"Parsed coordinates from headless browser: lat={lat}, lon={lon}")
+            logger.info(f"Parsed coordinates from lightweight browser: lat={lat}, lon={lon}")
             waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
             await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
             return
@@ -940,20 +1034,8 @@ def main() -> None:
 
     logger.info("Bot is starting...")
     
-    # Check browser health on startup
-    import asyncio
-    try:
-        logger.info("Performing browser health check...")
-        BROWSER_HEALTHY = asyncio.run(check_browser_health())
-        if BROWSER_HEALTHY:
-            logger.info("✅ Browser is healthy - headless browser resolution enabled")
-        else:
-            logger.warning("⚠️ Browser health check failed - headless browser resolution disabled")
-            logger.info("To fix this on a server, try running: playwright install-deps chromium")
-    except Exception as e:
-        logger.error(f"Browser health check error: {e}")
-        BROWSER_HEALTHY = False
-        logger.warning("⚠️ Browser health check failed - headless browser resolution disabled")
+    # We'll check browser health after the bot starts to avoid event loop conflicts
+    logger.info("Browser health will be checked on first use")
     
     logger.info("Starting bot polling...")
     app.run_polling()
