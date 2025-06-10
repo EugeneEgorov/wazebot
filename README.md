@@ -1,67 +1,93 @@
-# WazeBot - Google Maps to Waze Converter
+# 🤖 WazeBot
 
-A Telegram bot that converts Google Maps share links to Waze navigation links, making it easy to switch between mapping services.
+A Telegram bot that converts Google Maps share links to Waze navigation links.
 
-## 🚀 Features
+## Features
 
-- **Universal Link Support**: Handles both coordinate-based and place-based Google Maps links
-- **Multiple Fallback Methods**: Uses 8 different strategies to extract coordinates
-- **Smart Geocoding**: Falls back to OpenStreetMap geocoding when direct parsing fails
-- **Headless Browser Support**: Can handle JavaScript-heavy pages and consent dialogs
-- **Multi-language Support**: Works with Portuguese and English consent pages
-- **Fast & Reliable**: Tries lightweight methods first, then more complex ones if needed
+- ✅ Converts coordinate-based Google Maps links
+- ✅ Converts place/business Google Maps links  
+- ✅ Handles Google consent pages
+- ✅ Extracts place names for cleaner responses
+- ✅ Multiple fallback methods for reliability
+- ✅ Dockerized for easy deployment
 
-## 📋 Requirements
+## Quick Start with Docker 🐳
 
-- Python 3.7+
-- Telegram Bot Token
-- Required Python packages (see `requirements.txt`)
+### 1. Clone and Setup
+```bash
+git clone <your-repo>
+cd wazebot
+./setup.sh
+```
 
-## 🛠️ Installation
+### 2. Configure Bot Token
+```bash
+nano .env
+# Add your bot token: TELEGRAM_TOKEN=your_bot_token_here
+```
 
-1. **Clone the repository**:
-   ```bash
-   git clone <your-repo-url>
-   cd wazebot
-   ```
+### 3. Run the Bot
+```bash
+# Build and run
+docker-compose up --build
 
-2. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+# Run in background
+docker-compose up --build -d
 
-3. **Install Playwright browsers** (optional, for advanced fallback):
-   ```bash
-   playwright install chromium
-   ```
+# View logs
+docker-compose logs -f
 
-4. **Set up your Telegram bot**:
-   - Message [@BotFather](https://t.me/botfather) on Telegram
-   - Create a new bot with `/newbot`
-   - Copy your bot token
+# Stop
+docker-compose down
+```
 
-5. **Set environment variable**:
-   ```bash
-   export TELEGRAM_TOKEN="your_bot_token_here"
-   ```
+## Usage
 
-## 🚀 Usage
+1. Send any message with a Google Maps share link (maps.app.goo.gl/...)
+2. Bot will respond with the corresponding Waze link
+3. If it's a business/place, the response will include the place name
 
-1. **Start the bot**:
-   ```bash
-   python wazebot.py
-   ```
+Example:
+```
+You: https://maps.app.goo.gl/ABC123
+Bot: Here's your Waze link for Restaurant Name:
+     https://ul.waze.com/ul?ll=38.7693,-9.0977
+```
 
-2. **Use the bot on Telegram**:
-   - Start a chat with your bot
-   - Send any Google Maps share link (`maps.app.goo.gl/...`)
-   - Receive a Waze link in return!
+## How It Works
 
-### Example
+The bot uses multiple methods to extract coordinates:
 
-**Input**: `https://maps.app.goo.gl/XodKRcb7kt53ne8d9`
+1. **Direct parsing** - Extracts coordinates directly from URL patterns
+2. **Parameter parsing** - Looks for coordinates in URL parameters  
+3. **Place ID resolution** - Resolves place IDs using HTTP redirects
+4. **Headless browser** - Uses Playwright as final fallback for consent pages
 
-**Output**: `Here's your Waze link: https://ul.waze.com/ul?ll=38.7711111,-9.0925`
+## DigitalOcean Deployment
+
+1. Create a droplet (Ubuntu 20.04+ recommended)
+2. Clone the repository
+3. Run `./setup.sh` 
+4. Configure your bot token in `.env`
+5. Run `docker-compose up -d`
+
+The Docker approach handles all dependencies automatically and runs reliably on VPS environments.
+
+## Development
+
+To modify the bot:
+1. Edit `wazebot.py`
+2. Rebuild: `docker-compose up --build`
+
+## Troubleshooting
+
+- **Bot not responding**: Check logs with `docker-compose logs -f`
+- **Browser issues**: The Docker environment handles all browser dependencies
+- **Memory issues**: Increase droplet RAM or add swap space
+
+## Environment Variables
+
+- `TELEGRAM_TOKEN` - Your Telegram bot token (required)
 
 ## 🔧 How It Works
 
