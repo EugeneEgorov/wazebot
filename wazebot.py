@@ -882,10 +882,22 @@ def try_lightweight_browser_resolution(url: str) -> tuple[float, float] | None:
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text.strip()
-    if "maps.app.goo.gl/" not in text:
+    
+    # Check for both Google Maps short link formats
+    if "maps.app.goo.gl/" not in text and "goo.gl/maps/" not in text:
         return  # ignore if no Google Maps short link present
 
-    short_url = text.split()[0]
+    # Extract the first link that matches either pattern
+    short_url = None
+    words = text.split()
+    for word in words:
+        if "maps.app.goo.gl/" in word or "goo.gl/maps/" in word:
+            short_url = word
+            break
+    
+    if not short_url:
+        return
+        
     logger.info(f"Received short URL: {short_url}")
 
     try:
@@ -1019,7 +1031,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Send me a Google Maps share link (maps.app.goo.gl/…), and I'll return a Waze link.\n"
+        "Send me a Google Maps share link (maps.app.goo.gl/… or goo.gl/maps/…), and I'll return a Waze link.\n"
         "Works with both coordinate links and place links!"
     )
 

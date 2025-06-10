@@ -43,7 +43,7 @@ docker-compose down
 
 ## Usage
 
-1. Send any message with a Google Maps share link (maps.app.goo.gl/...)
+1. Send any message with a Google Maps share link (maps.app.goo.gl/... or goo.gl/maps/...)
 2. Bot will respond with the corresponding Waze link
 3. If it's a business/place, the response will include the place name
 
