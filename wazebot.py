@@ -21,15 +21,25 @@ if not TELEGRAM_TOKEN:
 BROWSER_HEALTHY = True
 BROWSER_HEALTH_CHECKED = False
 
+# ─── Regex patterns to extract Google Maps URLs from text ─────────────────────
+GOOGLE_MAPS_URL_PATTERN = re.compile(
+    r'https?://(?:www\.)?(?:maps\.app\.goo\.gl|goo\.gl/maps|maps\.google\.com|google\.com/maps)[^\s]*',
+    re.IGNORECASE
+)
+
 # ─── Regex patterns to find numeric coordinates in a Google Maps URL ───────────────
 # 1) /@<lat>,<lon>,<zoom>/
 # 2) ?api=1&query=<lat>,<lon>
 # 3) !3d<lat>!4d<lon>
-# 4) fallback: any "<lat>,<lon>" anywhere
+# 4) fallback: any "<lat>,<lon>" anywhere in the URL (not in the full text)
 COORD_PATTERN_AT   = re.compile(r"/@(-?\d+\.\d+),(-?\d+\.\d+),")
 COORD_PATTERN_Q    = re.compile(r"[?&]query=(-?\d+\.\d+),(-?\d+\.\d+)")
 COORD_PATTERN_BANG = re.compile(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)")
 COORD_PATTERN_ANY  = re.compile(r"@?(-?\d+\.\d+),\s*(-?\d+\.\d+)")
+
+# Pattern to extract coordinates from directions URLs (/dir/from/to/...)
+# Format: /dir/start_lat,start_lon/dest_lat,dest_lon/...
+DIRECTIONS_PATTERN = re.compile(r"/dir/(-?\d+\.\d+),(-?\d+\.\d+)/(-?\d+\.\d+),(-?\d+\.\d+)")
 
 # Pattern to extract place ID from Google Maps URLs
 PLACE_ID_PATTERN = re.compile(r"1s0x[a-f0-9]+:0x[a-f0-9]+")
@@ -42,34 +52,62 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def extract_google_maps_urls(text: str) -> list[str]:
+    """
+    Extract all Google Maps URLs from the given text.
+    Returns a list of URLs found in the text.
+    """
+    urls = GOOGLE_MAPS_URL_PATTERN.findall(text)
+    return urls
+
+
 def extract_coordinates_from_google_url(url: str) -> tuple[float, float] | None:
     """
     Attempt to extract a (lat, lon) pair from a Google Maps URL using multiple patterns:
+      0. For directions URLs (/dir/), extract destination coordinates
       1. /@<lat>,<lon>,<zoom>/
       2. ?api=1&query=<lat>,<lon>
       3. !3d<lat>!4d<lon>
       4. Fallback: any "<lat>,<lon>" anywhere
     """
+    logger.info(f"Extracting coordinates from URL: {url}")
+    
+    # 0) Check for directions URLs first - extract destination coordinates
+    if '/dir/' in url:
+        logger.info("Detected directions URL - calling extract_coordinates_from_directions_url")
+        coords = extract_coordinates_from_directions_url(url)
+        if coords:
+            logger.info(f"Successfully extracted coordinates from directions URL: {coords}")
+            return coords
+        else:
+            logger.info("Failed to extract coordinates from directions URL, trying other methods")
+    
     # 1) /@LAT,LON,…
     match = COORD_PATTERN_AT.search(url)
     if match:
+        logger.info(f"Found coordinates with COORD_PATTERN_AT: {match.groups()}")
         return float(match.group(1)), float(match.group(2))
 
     # 2) ?api=1&query=LAT,LON
     match = COORD_PATTERN_Q.search(url)
     if match:
+        logger.info(f"Found coordinates with COORD_PATTERN_Q: {match.groups()}")
         return float(match.group(1)), float(match.group(2))
 
     # 3) !3dLAT!4dLON
     match = COORD_PATTERN_BANG.search(url)
     if match:
+        logger.info(f"Found coordinates with COORD_PATTERN_BANG: {match.groups()}")
         return float(match.group(1)), float(match.group(2))
 
-    # 4) Fallback: any "LAT,LON" in the URL
-    match = COORD_PATTERN_ANY.search(url)
-    if match:
-        return float(match.group(1)), float(match.group(2))
+    # 4) Fallback: any "LAT,LON" in the URL (but not for directions URLs)
+    if '/dir/' not in url:  # Avoid picking up starting coordinates in directions URLs
+        match = COORD_PATTERN_ANY.search(url)
+        if match:
+            logger.info(f"Found coordinates with COORD_PATTERN_ANY: {match.groups()}")
+            return float(match.group(1)), float(match.group(2))
 
+    logger.info("No coordinates found with any pattern")
     return None
 
 
@@ -191,6 +229,12 @@ def extract_coordinates_from_place_url_params(url: str) -> tuple[float, float] |
     Some Google Maps URLs embed coordinates in different parts of the URL.
     """
     try:
+        # First check if this is a directions URL
+        if '/dir/' in url:
+            coords = extract_coordinates_from_directions_url(url)
+            if coords:
+                return coords
+        
         # Look for coordinates in various URL parameter patterns
         patterns_to_try = [
             # Look for !3d and !4d patterns in URL fragments
@@ -217,6 +261,12 @@ def extract_coordinates_from_place_url_params(url: str) -> tuple[float, float] |
             from urllib.parse import unquote
             decoded_data = unquote(data_part)
             logger.info(f"Checking decoded data part: {decoded_data}")
+            
+            # Check for directions in decoded data first
+            if '/dir/' in decoded_data:
+                coords = extract_coordinates_from_directions_url(decoded_data)
+                if coords:
+                    return coords
             
             for pattern in patterns_to_try:
                 matches = re.findall(pattern, decoded_data)
@@ -880,25 +930,91 @@ def try_lightweight_browser_resolution(url: str) -> tuple[float, float] | None:
     return None
 
 
+def extract_coordinates_from_directions_url(url: str) -> tuple[float, float] | None:
+    """
+    Extract destination coordinates from a Google Maps directions URL.
+    Directions URLs have the format: /dir/start_lat,start_lon/dest_lat,dest_lon/...
+    We want the destination coordinates (the second pair).
+    """
+    try:
+        # Check if this is a directions URL
+        if '/dir/' not in url:
+            logger.info(f"Not a directions URL (no /dir/ found): {url}")
+            return None
+            
+        logger.info(f"Processing directions URL: {url}")
+        
+        # Extract both starting and destination coordinates
+        match = DIRECTIONS_PATTERN.search(url)
+        if match:
+            start_lat, start_lon = float(match.group(1)), float(match.group(2))
+            dest_lat, dest_lon = float(match.group(3)), float(match.group(4))
+            logger.info(f"Found directions URL - Start: ({start_lat}, {start_lon}), Destination: ({dest_lat}, {dest_lon})")
+            logger.info(f"Returning destination coordinates: lat={dest_lat}, lon={dest_lon}")
+            return dest_lat, dest_lon
+        else:
+            logger.info(f"DIRECTIONS_PATTERN did not match: {url}")
+            
+        # Fallback: try to extract all coordinate pairs from the /dir/ part using a simpler approach
+        dir_part_match = re.search(r'/dir/([^?#]+)', url)
+        if dir_part_match:
+            dir_part = dir_part_match.group(1)
+            logger.info(f"Extracted dir part: {dir_part}")
+            # Find all coordinate pairs in the dir part
+            coord_matches = re.findall(r'(-?\d+\.\d+),(-?\d+\.\d+)', dir_part)
+            logger.info(f"Found {len(coord_matches)} coordinate pairs in directions URL: {coord_matches}")
+            
+            if len(coord_matches) >= 2:
+                # Take the second (destination) coordinates
+                lat, lon = float(coord_matches[1][0]), float(coord_matches[1][1])
+                logger.info(f"Extracted destination coordinates from directions URL (fallback): lat={lat}, lon={lon}")
+                return lat, lon
+            elif len(coord_matches) == 1:
+                # Only one coordinate pair - might be destination only
+                lat, lon = float(coord_matches[0][0]), float(coord_matches[0][1])
+                logger.info(f"Extracted single coordinate from directions URL: lat={lat}, lon={lon}")
+                return lat, lon
+        else:
+            logger.info(f"Could not extract dir part from URL: {url}")
+                
+    except Exception as e:
+        logger.error(f"Error extracting coordinates from directions URL: {e}")
+    
+    logger.info(f"Failed to extract any coordinates from directions URL: {url}")
+    return None
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text.strip()
     
-    # Check for both Google Maps short link formats
-    if "maps.app.goo.gl/" not in text and "goo.gl/maps/" not in text:
-        return  # ignore if no Google Maps short link present
-
-    # Extract the first link that matches either pattern
-    short_url = None
-    words = text.split()
-    for word in words:
-        if "maps.app.goo.gl/" in word or "goo.gl/maps/" in word:
-            short_url = word
-            break
+    # Extract all Google Maps URLs from the message text
+    google_maps_urls = extract_google_maps_urls(text)
     
-    if not short_url:
-        return
+    if not google_maps_urls:
+        # Also check for the simple patterns we were looking for before
+        if "maps.app.goo.gl/" not in text and "goo.gl/maps/" not in text:
+            return  # ignore if no Google Maps links present
         
-    logger.info(f"Received short URL: {short_url}")
+        # Fallback: extract URLs the old way for edge cases
+        short_url = None
+        words = text.split()
+        for word in words:
+            if "maps.app.goo.gl/" in word or "goo.gl/maps/" in word:
+                short_url = word
+                break
+        
+        if not short_url:
+            return
+        
+        google_maps_urls = [short_url]
+    
+    # Process the first Google Maps URL found
+    short_url = google_maps_urls[0]
+    logger.info(f"Extracted Google Maps URL from text: {short_url}")
+    
+    # Clean up the URL by removing trailing punctuation if it got caught
+    short_url = re.sub(r'[^\w\-\./?=&:]+$', '', short_url)
+    logger.info(f"Cleaned URL: {short_url}")
 
     try:
         # 1) GET with a browser User-Agent to force the full "@" or "!3d!4d" patterns
@@ -924,25 +1040,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Extract place name for more informative responses
     place_name = extract_place_name(expanded_url)
-    place_text = f" for {place_name}" if place_name else ""
+    
+    # Check if this is a directions URL and provide appropriate messaging
+    is_directions_url = '/dir/' in expanded_url
+    if is_directions_url:
+        place_text = " to your destination"
+        if place_name:
+            place_text = f" to {place_name}"
+    else:
+        place_text = f" for {place_name}" if place_name else ""
 
-    # 3) Try to parse numeric coordinates directly
+    # 3) Try to parse numeric coordinates directly from the EXPANDED URL (not the original text)
     coords = extract_coordinates_from_google_url(expanded_url)
     if coords:
         lat, lon = coords
-        logger.info(f"Parsed coordinates directly: lat={lat}, lon={lon}")
-        waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
-        await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
+        if is_directions_url:
+            logger.info(f"Parsed destination coordinates from directions URL: lat={lat}, lon={lon}")
+            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
+            await update.message.reply_text(f"🧭 Here's your Waze link{place_text}:\n{waze_link}")
+        else:
+            logger.info(f"Parsed coordinates directly from expanded URL: lat={lat}, lon={lon}")
+            waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
+            await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
         return
 
-    # 4) Try to extract coordinates from URL parameters/fragments
+    # 4) Try to extract coordinates from URL parameters/fragments of the EXPANDED URL
     logger.info("Direct coordinate parsing failed, trying URL parameter parsing...")
     coords = extract_coordinates_from_place_url_params(expanded_url)
     if coords:
         lat, lon = coords
         logger.info(f"Parsed coordinates from URL parameters: lat={lat}, lon={lon}")
         waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
-        await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
+        if is_directions_url:
+            await update.message.reply_text(f"🧭 Here's your Waze link{place_text}:\n{waze_link}")
+        else:
+            await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
         return
 
     # 5) Check if we're hitting consent pages - if so, skip HTTP methods and go to browser
@@ -960,7 +1092,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 lat, lon = coords
                 logger.info(f"Parsed coordinates from direct place ID resolution: lat={lat}, lon={lon}")
                 waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
-                await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
+                if is_directions_url:
+                    await update.message.reply_text(f"🧭 Here's your Waze link{place_text}:\n{waze_link}")
+                else:
+                    await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
                 return
         
         # Try lightweight browser (most accurate)
@@ -970,7 +1105,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             lat, lon = coords
             logger.info(f"Parsed coordinates from lightweight browser: lat={lat}, lon={lon}")
             waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
-            await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
+            if is_directions_url:
+                await update.message.reply_text(f"🧭 Here's your Waze link{place_text}:\n{waze_link}")
+            else:
+                await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
             return
     else:
         # No consent detected - try a few quick HTTP methods before browser
@@ -997,7 +1135,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                 lat, lon = coords
                                 logger.info(f"Parsed coordinates from quick redirect: lat={lat}, lon={lon}")
                                 waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
-                                await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
+                                if is_directions_url:
+                                    await update.message.reply_text(f"🧭 Here's your Waze link{place_text}:\n{waze_link}")
+                                else:
+                                    await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
                                 return
                 except Exception as e:
                     logger.info(f"Quick method failed: {e}")
@@ -1009,7 +1150,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 lat, lon = coords
                 logger.info(f"Parsed coordinates from direct place ID resolution: lat={lat}, lon={lon}")
                 waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
-                await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
+                if is_directions_url:
+                    await update.message.reply_text(f"🧭 Here's your Waze link{place_text}:\n{waze_link}")
+                else:
+                    await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
                 return
 
         # Try lightweight browser (most accurate)
@@ -1019,7 +1163,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             lat, lon = coords
             logger.info(f"Parsed coordinates from lightweight browser: lat={lat}, lon={lon}")
             waze_link = f"https://ul.waze.com/ul?ll={lat},{lon}"
-            await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
+            if is_directions_url:
+                await update.message.reply_text(f"🧭 Here's your Waze link{place_text}:\n{waze_link}")
+            else:
+                await update.message.reply_text(f"Here's your Waze link{place_text}:\n{waze_link}")
             return
 
     logger.info("❌ Failed to parse coordinates from expanded URL using all methods.")
@@ -1031,8 +1178,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Send me a Google Maps share link (maps.app.goo.gl/… or goo.gl/maps/…), and I'll return a Waze link.\n"
-        "Works with both coordinate links and place links!"
+        "🗺️ Send me a message containing a Google Maps link, and I'll convert it to a Waze link!\n\n"
+        "📍 I can extract links from any text - just paste your message with a Google Maps link and I'll find it.\n\n"
+        "✅ Supported formats:\n"
+        "• maps.app.goo.gl/...\n"
+        "• goo.gl/maps/...\n"
+        "• maps.google.com/...\n"
+        "• google.com/maps/...\n\n"
+        "🧭 Special features:\n"
+        "• For directions URLs: I'll extract the destination coordinates\n"
+        "• For place URLs: I'll extract the location coordinates\n\n"
+        "🚗 Works with both coordinate links and place links!"
     )
 
 
